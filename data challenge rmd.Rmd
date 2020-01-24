@@ -1,0 +1,836 @@
+---
+title: "AirBnb & Zillow Data Challenge"
+author: "Elaine Ji"
+date: "2020/1/20"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+```{r library,include=FALSE}
+#Packages
+#data preparation
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(stringr)
+#forecast
+library(forecast)
+#visualization
+library(RColorBrewer)
+library(plotly)
+library(knitr)
+#map
+library(devtools)
+library(leaflet)
+#dashboard
+library(shiny)
+library(shinydashboard)
+```
+
+<br/>
+
+# Introduction    
+
+## What’s the problem?    
+
+The aim of the study is to assist a real estate company that has a niche in purchasing properties to rent out short-term as part of their business model specifically within New York City. The company has already figured out that 2-bedroom properties are the best for investment; however, they do not know which zipcodes are the best to invest in. A data product is requested to build in order to help the company understand which zipcodes would generate the most profit on short term rentals within New York City.    
+
+<br/>
+
+## Dataset    
+
+For this purpose, publicly available data from Zillow and AirBnB are used:   
+
+1. Cost Data - Estimate of value for two-bedroom properties provided by Zillow   
+<http://insideairbnb.com/get-the-data.html>   
+
+2. Revenue Data - AirBnB dataset with relevant short-term rental information   
+<https://www.zillow.com/research/data/>   
+
+
+3. The Latest Cost Data – A historical estimated data of value for two-bedroom properties from 2008-01 to 2019-11, provided by Zillow   
+<https://www.zillow.com/research/data/>    
+
+<br/>
+
+## Assumptions    
+
+1. Short-term rental: A property that is rented anywhere between one evening up to one month is considered a short-term rental.   
+2. Weekly and monthly price: Weekly or monthly price of a property is a discount price for longer term stays. A property without a weekly or monthly price does not have discount price.   
+3. Tenants’ booking habit: We assume that in a month 60% of bookings are single day bookings, 30% are weekly bookings and 10% of bookings are made for a month.    
+4. Occupancy rate: The occupancy rate is assumed to be 75%.    
+5. Weather/Holiday has little or no impact on number of bookings.   
+6. The revenue obtained from a property remains equal to that charged by the previous host.   
+7. The company will put properties on rent throughout the year every day.   
+8. The investor will pay for the property in cash (i.e. no mortgage/interest rate will need to be accounted for).   
+9. The time value of money discount rate is 0% (i.e. $1 today is worth the same 100 years from now).   
+10. All properties and all square feet within each locale can be assumed to be homogeneous (i.e. a 1000 square foot property in a locale such as Bronx or Manhattan generates twice the revenue and costs twice as much as any other 500 square foot property within that same locale.)   
+
+All the percentages assumed above can be modified by user preference.    
+
+<br/>
+
+***
+
+# Packages    
+**Data preparation:**   
+library(tidyverse)   
+library(dplyr)   
+library(stringr)   
+
+**Forecast:**   
+library(forecast)   
+
+**Visualization:**   
+library(RColorBrewer)   
+library(plotly)   
+library(ggmap)
+library(knitr)   
+
+**Dashboard:**   
+library(shiny)   
+library(shinydashboard)   
+
+<br/>
+
+***   
+
+# Data Input   
+
+In order to fit the problem requirement and simply the future analysis, we filter the rows and select the relevant columns to keep all of the 2-bedroom properties in New York City for short-term rent.
+
+```{r filter, warning=FALSE}
+setwd("D:/job search/capital one/data challenge/Data challenge - Elaine Ji")
+airbnb <- read_csv("listings.csv")
+zillow <- read_csv("Zip_Zhvi_2bedroom.csv")
+
+#subset of airbnb
+airbnb_subset <- airbnb %>%
+  filter(bedrooms == 2, minimum_nights < 31) %>%
+  select(id, last_scraped, zipcode, neighbourhood, neighbourhood_cleansed, 
+         neighbourhood_group_cleansed, latitude, longitude, square_feet, room_type,
+         price, weekly_price,monthly_price, minimum_nights, maximum_nights)
+
+#subset of zillow
+zillow_subset <- zillow %>%
+  filter(City == "New York") %>%
+  select(-c(City, State, Metro, CountyName, SizeRank))
+```
+
+<br/>
+
+***   
+
+# Quality Check   
+
+## Cost Data   
+
+
+Data provides estimated historical median price for 2-bedroom homes in each zip code, captured between year 1996 and 2017 and spread monthly.   
+
+
+```{r cost_table, warning=FALSE}
+kableExtra::kable_styling(knitr::kable(head(zillow_subset), "html"),
+                          bootstrap_options ="striped") %>% 
+  kableExtra::scroll_box(width = "100%", height = "250px")
+```
+
+<br/>
+
+### Data Quality     
+
+**1. Missing values**   
+
+Median price for early years (1996-2013) has plenty of NAs as shown in the table below. Steps are taken in the following section to exclude columns with NAs when trend calculation and time series forecast.   
+
+```{r cost_missing_tbl, warning=FALSE}
+cost_missing_val <- sapply(zillow_subset, function(x) sum(length(which(is.na(x)))))  
+kable(as.data.frame(cost_missing_val)) %>% 
+  kableExtra::kable_styling(bootstrap_options = "striped") %>%
+  kableExtra::scroll_box(width = "100%", height = "250px")
+```
+For future analysis, we filter the rows and select the relevant columns to keep the values of properties in New York City at the scraped date.   
+
+
+<br/>
+
+**2. Missing zipcodes of NYC**   
+
+New York hosts 176 zipcodes. However, there are only 25 zipcodes of NYC recorded in this data set. We are going to settle with this data for now. New data source can be connected in the future to account for rest of the zipcodes.
+
+<br/>
+
+## Revenue Data   
+     
+
+
+Revenue data contains information including details about the properties including location, number of bedrooms, room types, price and other details for stay.   
+
+
+```{r rev_table, warning=FALSE}
+kable(head(airbnb))  %>% 
+  kableExtra::kable_styling(bootstrap_options ="striped") %>% 
+  kableExtra::scroll_box(width = "100%", height = "250px")
+```
+
+In order to simplify the analysis, we only select 15 relevant variables and filter 2-bedroom properties in NYC to create a subset for the following section.   
+
+<br/>
+
+
+### Data Quality     
+
+**1. Needless character**   
+
+‘$’ Value prefix of every price row prevents numeric manipulation. It is thus removed from three columns: Price, Weekly Price & Monthly Price.   
+
+<br/>
+
+**2. Missing values**   
+  
+
+```{r rev_missing_tbl, warning=FALSE}
+rev_missing_val <- sapply(airbnb, function(x) sum(length(which(is.na(x)))))  
+kable(as.data.frame(rev_missing_val)) %>% 
+  kableExtra::kable_styling(bootstrap_options = "striped") %>%
+  kableExtra::scroll_box(width = "100%", height = "250px")
+```
+
+<br/>
+
+  + **zipcode**   
+There are less than 1% missing values in zipcode. Ignoring these values will not cause much effect to the analysis.   
+
+<br/>
+
+  + **weekly and monthly price**   
+There are more than 80% weekly and monthly price missing. Since we assume that the weekly or monthly price of a property is a discount price for longer term stays, and a property without a weekly or monthly price does not have discount price, we can simply fill in the NAs with 7 and 31 times of daily price.   
+
+<br/>
+
+**3. Extreme values**   
+
+There are a few of extreme values in price such as \$9,000 or \$0 per night. The reason for this issue could be a data input error of the hosts. We can simply remove these rows.     
+<br/>
+
+**4. Ambiguous match between zipcode and neighborhood**   
+
+Some zipcodes belong to more than one neighborhood in the dataset. To solve this problem, we keep the neighborhood where the zipcode normally belongs as the only match.
+
+
+```{r clean, warning=FALSE}
+#Quality Check
+#1. missing value of zip code of NYC in zillow
+#solution: new data source can be connected in the future
+
+#2. Remove needless character and convert character to numeric
+chr_to_num <- function(col_name) {
+  col_name <- str_sub(col_name, 2, -4)
+  col_name <- str_replace_all(col_name, ",", "")
+  col_name <- as.numeric(col_name)
+}
+
+airbnb_subset$price <- chr_to_num(airbnb_subset$price)
+airbnb_subset$weekly_price <- chr_to_num(airbnb_subset$weekly_price)
+airbnb_subset$monthly_price <- chr_to_num(airbnb_subset$monthly_price)
+
+
+#3. NAs in weekly price and monthly price
+#solution: fill in the NAs with 7 and 31 times of daily price
+
+missing_weekly <- which(is.na(airbnb_subset["weekly_price"]))
+airbnb_subset$weekly_price[missing_weekly] <- airbnb_subset$price[missing_weekly]*7
+
+missing_monthly <- which(is.na(airbnb_subset["monthly_price"]))
+airbnb_subset$monthly_price[missing_monthly] <- airbnb_subset$price[missing_monthly]*30
+
+
+#4. extreme values in price
+#It can't be $9,999 or $0 a night.
+#The reason for this could be a data input error of the host
+airbnb_subset <- subset(airbnb_subset, price < 9000 & price != 0)
+
+
+#5. zipcode: convert numeric to character
+airbnb_subset$zipcode <- as.character(airbnb_subset$zipcode)
+
+```
+<br/>
+
+***   
+
+# Data Munging   
+
+### Time Unit   
+
+The two datasets have different units of time. In order to complete the analysis, we determine a common unit of time, which is month.    
+
+<br/>
+
+### ARIMA Forecast   
+
+The revenue data is scraped in 2019-07, but the cost data only have historical house The revenue data is scraped in 2019-07, but the cost data only have historical house value from 1996-04 to 2017-06. Due to shortage of time, we assume that there is seasonality in the price and that values depend not only on previous values (Auto Regressive AR) but also on differences between previous values (Moving Average MA). So, we apply **ARIMA** model to predict the cost of the properties in zipcodes from 2017-07 to 2019-07. We then attach the price of property in 2019-07 calculated at zipcode level with each zipcode as a new column to cost data.    
+
+
+```{r forecast, warning=FALSE}
+#determine a common unit of time - monthly
+airbnb_subset$last_scraped <- format(airbnb_subset$last_scraped,format="%Y-%m")
+
+
+#trend of house price
+design.mat <- cbind(1,1:121)
+response.mat <- t(zillow_subset[,3:257])
+response.mat <- response.mat[complete.cases(response.mat),]
+
+reg <- lm.fit(design.mat, response.mat)$coefficients
+zillow_subset <- cbind(zillow_subset, t(reg))
+names(zillow_subset)[names(zillow_subset)=="x1"]="intercept"
+names(zillow_subset)[names(zillow_subset)=="x2"]="slope"
+
+
+#forecast
+scraped_date <- unique(airbnb_subset$last_scraped)
+
+zillow_subset$scraped_date <- NULL
+for(i in 1:nrow(zillow_subset)){
+  # Convert the monthly cost data into time series data 
+  time_series = ts(as.vector(t(zillow_subset[,c(3:257)])[,i]),
+                   start = c(1996,4),frequency = 12) 
+  
+  # Define ARIMA model to be used for prediction
+  ARIMAfit = arima(time_series, order=c(1,1,1), seasonal=list(order=c(1,0,1),
+                   period=NA), method="ML")
+  
+  # use the ARIMA model to predict the price from 2017-07 to 2019-07
+  pred = predict(ARIMAfit, n.ahead = 25)
+  
+  # Store the predicted values in a variable
+  pred_val <- pred$pred  
+  
+  # set the value of current price for the specific zipcode as price in 2019-07
+  zillow_subset$scraped_date[i] <- pred_val[length(pred_val)] 
+}
+
+
+```
+
+<br/>
+
+### Data Join   
+
+In order to make sure this product is always applicable whenever new data is available or whenever we are ready to approach a new market, a function is built to link the data together in a scalable way by matching the scraped date and zipcode of two datasets.  
+
+After inner join, we recognize that there are 1508 properties of 24 zipcodes in 4 distinct neighborhoods - Manhattan, Queens, Brooklyn and Staten Island – matching together.   
+
+
+```{r join, warning=FALSE}
+#link the data together in a scalable way
+names(zillow_subset)[names(zillow_subset)=="RegionName"]="zipcode"
+dt_full <- merge(airbnb_subset, zillow_subset, by = "zipcode")
+dt <- select(dt_full, zipcode:RegionID, scraped_date, growth_rate = "slope")
+```
+
+<br/>
+
+### Price corrected   
+
+**Property type issue**     
+
+If the property type == Private Room, the price of the property should be corrected by price*bedrooms   
+
+<br/>
+
+**Average daily price**     
+
+In order to calculate the average daily price, we need to consider both tenant booking habit and host requirement for minimum and maximum nights.     
+
+Based on the common sense of general booking habit, we assume that in a month 60% of bookings are single day bookings, 30% are weekly bookings and 10% of bookings are made for a month.      
+
+As for the minimum/maximum amount of nights the host is willing to rent out the property, we assume that the minimum/maximum nights determine whether a property can be directly booked for a weekly and for a month.   
+
+Considering these two factors, we can calculate the average daily price by a conditional metric of minimum/maximum nights and booking habit weights.    
+
+
+```{r price_correct, warning=FALSE}
+
+#Price corrected
+#If the property type == Private Room, total price should be corrected by price*bedrooms
+dt <- dt %>% 
+  mutate(price = if_else(room_type == "Private room", price * 2, price)) 
+
+#assumption: 0.6 daily price, 0.3 weekly price, 0.1 monthly price. 
+#This coefficient can change
+daily_prob <- 0.6
+weekly_prob <- 0.3
+monthly_prob <- 0.1
+dt$avg_daily_price <- 0
+for(i in 1:nrow(dt)){
+  if(dt$minimum_nights[i]<7 & dt$maximum_nights[i]<7){
+    dt$avg_daily_price[i] = dt$price[i]
+  } else if (dt$minimum_nights[i]<7 & dt$maximum_nights[i]>=7 & dt$maximum_nights[i]<30){
+    dt$avg_daily_price[i] = daily_prob*dt$price[i]
+    +(weekly_prob+monthly_prob)*dt$weekly_price[i]/7
+  } else if (dt$minimum_nights[i]<7 & dt$maximum_nights[i]>=30){
+    dt$avg_daily_price[i] = daily_prob*dt$price[i]+weekly_prob*dt$weekly_price[i]/7+
+      monthly_prob*dt$monthly_price[i]/30
+  } else if (dt$minimum_nights[i]>=7 & dt$minimum_nights[i]<30
+             & dt$maximum_nights[i]>=7 & dt$maximum_nights[i]<30){
+    dt$avg_daily_price[i] = dt$weekly_price[i]/7
+  } else if (dt$minimum_nights[i]>=7 & dt$minimum_nights[i]<30
+             & dt$maximum_nights[i]>=30){
+    dt$avg_daily_price[i] = (daily_prob+weekly_prob)*dt$weekly_price[i]/7
+    +monthly_prob*dt$monthly_price[i]/30
+  } else if (dt$minimum_nights[i]>=30 & dt$maximum_nights[i]>=30){
+    dt$avg_daily_price[i] = dt$monthly_price[i]/30
+  }
+}
+
+occupancy_rate <- 0.75
+dt$monthly_rev <- dt$avg_daily_price*30*occupancy_rate
+dt$annual_rev <- dt$monthly_rev*12
+
+
+#summarize by zipcode
+zip_summary <- dt %>%
+  group_by(zipcode) %>%
+  summarize(count = n(), 
+            avg_monthly_rev = round(mean(monthly_rev),2), 
+            avg_annual_rev = round(mean(annual_rev),2),
+            avg_cost = round(mean(scraped_date),2),
+            payback_year = round(mean(avg_cost/avg_annual_rev),2),
+            rev_cost_ratio = round(avg_annual_rev/avg_cost,2),
+            trend = round(mean(growth_rate),2),
+            neighbourhood_group_cleansed = 
+              paste(unique(neighbourhood_group_cleansed), collapse = ","))
+
+#some zipcodes belong to more than one neighborhood
+zip_summary <- zip_summary %>%
+  separate(neighbourhood_group_cleansed, c("neighbourhood", NA), sep = ",")
+
+
+```
+
+<br/>
+
+***   
+
+# Data Visualization  
+
+In order to smoothen the process of choosing the zipcodes that are the best to invest in, the analysis going forward considers several key factors, which will finally be integrated to choose the top zipcodes.   
+
+Zipcodes are evaluated on the following conditions:   
+
+* Number of properties   
+
+* Cost of properties  
+
+* Average daily price  
+
+* Annual revenue  
+
+* Payback year  
+
+* Revenue cost ratio  
+
+* Growth rate of price  
+
+<br/>
+
+## Number of properties   
+
+Higher the number of properties, more choices our client can invest, and more rental activities can possibly have in the area.    
+
+At the neighborhood level, Manhattan and Brooklyn host highest number of properties. Queens and Staten Island have much fewer number of properties.  
+
+Zipcodes 11215, 10036, 10003, 11217, 10025, 10013 have more than 100 properties in each area, which makes them the top 10 based on volume of properties.   
+
+```{r count, warning=FALSE}
+#number of properties
+num_house_plot <- 
+  zip_summary %>%
+  arrange(desc(count)) %>%
+  top_n(10, count) %>%
+  ggplot(aes(x = reorder(zipcode, count), y = count, fill = neighbourhood))+
+  geom_col()+
+  coord_flip()+
+  labs(x = "Zipcode", y = "Number of Properties")+
+  theme_bw() + 
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),panel.border = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1))+
+  guides(fill = guide_legend(title = "Neighbourhood"))
+
+ggplotly(num_house_plot)
+
+```
+
+<br/>
+
+## Cost of properties   
+
+One of the primary constraints in decision of investment is the cost. Lower the cost, company can save a lot more and reach ROI faster.   
+Zipcodes in Manhattan walk away with highest property cost, with an average of about \$2M. Brooklyn comes second, with about \$1M. Zipcodes in Staten Island and Queens have much lower prices, with lower than \$0.5M.  
+
+```{r cost, warning=FALSE}
+cost_plot <- 
+  zip_summary %>%
+  arrange(desc(avg_cost)) %>%
+  top_n(24, avg_cost) %>%
+  ggplot(aes(x = reorder(zipcode, avg_cost), y = avg_cost, fill = neighbourhood))+
+  geom_col()+
+  coord_flip()+
+  labs(x = "Zipcode", y = "Cost of Properties")+
+  theme_bw() + 
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),panel.border = element_blank(),
+        axis.text.x = element_text(hjust = 1))+
+  scale_y_continuous(breaks=c(0, 1000000, 2000000), labels=c("0","1M","2M"))+
+  guides(fill = guide_legend(title = "Neighbourhood"))
+
+ggplotly(cost_plot)
+
+```
+
+<br/>
+
+
+## Average daily price   
+
+Higher the average daily rental price, faster is the cash flow. Therefore, company would look forward to making quick bucks with high daily price.   
+Manhattan has a wider spread with higher price ranging to \$50-\$1000 per night.   
+Brooklyn comes second also with wide spread but lower price comparing to Manhattan.   
+Staten Island and Queens have lower price and narrower distribution, and this is probably because of limited sample size.   
+ 
+
+```{r daily_price, warning=FALSE}
+price_plot <- ggplot(dt,aes(x = reorder(zipcode, avg_daily_price),
+                            y = avg_daily_price, 
+                            fill = neighbourhood_group_cleansed))+
+  geom_boxplot()+
+  coord_flip()+
+  labs(x = "Zipcode", y = "Annual Daily Price of Properties")+
+  theme_bw() + 
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),panel.border = element_blank(),
+        axis.text.x = element_text(hjust = 1))+
+  guides(fill = guide_legend(title = "Neighbourhood")) +
+  scale_y_continuous(limits = quantile(dt$avg_daily_price, c(0, 0.99)))
+
+ggplotly(price_plot)
+
+```
+
+
+<br/>
+
+## Annual revenue    
+
+Different from the daily price, the annual revenue also taken into account the effects of weekly/monthly discount prices, minimum/maximum days and occupancy rate. Therefore, the annual revenue will provide a more comprehensive information to help us make better investment choices.   
+As usual, Manhattan has the highest revenue, and Brooklyn comes second.       
+
+```{r revenue, warning=FALSE}
+rev_plot <- 
+  zip_summary %>%
+  arrange(desc(avg_annual_rev)) %>%
+  top_n(10, avg_annual_rev) %>%
+  ggplot(aes(x = reorder(zipcode, avg_annual_rev), 
+             y = avg_annual_rev, fill = neighbourhood))+
+  geom_col()+
+  coord_flip()+
+  labs(x = "Zipcode", y = "Annual Revenue of Properties")+
+  theme_bw() + 
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),panel.border = element_blank(),
+        axis.text.x = element_text(hjust = 1))+
+  scale_y_continuous(breaks=c(0, 100000, 200000,300000), 
+                     labels=c("0","1M","2M","3M"))+
+  guides(fill = guide_legend(title = "Neighbourhood"))
+
+ggplotly(rev_plot)
+
+```
+
+<br/>
+
+## Payback year    
+
+Companies also value payback year when making investment decisions. The shorter the payback time, the faster the company can recoup its initial capital.   
+The zipcode 10306 in Staten Island has the shortest payback year (12 years), while nearly all the zipcodes in Manhattan and Brooklyn have more than 20 years of payback time.     
+
+
+```{r payback, warning=FALSE}
+#payback year
+payback_plot <- 
+  zip_summary %>%
+  arrange(desc(payback_year)) %>%
+  top_n(10, payback_year) %>%
+  ggplot(aes(x = reorder(zipcode, payback_year),y = payback_year, fill = neighbourhood))+
+  geom_col()+
+  coord_flip()+
+  labs(x = "Zipcode", y = "Payback Year of Properties")+
+  theme_bw() + 
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),panel.border = element_blank(),
+        axis.text.x = element_text(hjust = 1))+
+  guides(fill = guide_legend(title = "Neighbourhood"))
+
+ggplotly(payback_plot)
+
+```
+
+<br/>
+
+## Revenue cost ratio    
+
+Company should invest in those zipcodes which provide high return, which also means high revenue to cost ratio.     
+We notice that zipcode 11434, 10308 and 10306 in Queens and Staten Island provide the highest return for each dollar spent in buying the property, which is about 8%. Then comes to 11234 in Brooklyn. Most of Manhattan’s zipcodes have low return rates.    
+
+
+
+```{r roi, warning=FALSE}
+#profitability
+profit_plot <- 
+  zip_summary %>%
+  arrange(desc(rev_cost_ratio)) %>%
+  top_n(10, rev_cost_ratio) %>%
+  ggplot(aes(x = reorder(zipcode,rev_cost_ratio),
+             y = rev_cost_ratio, fill = neighbourhood))+
+  geom_col()+
+  coord_flip()+
+  labs(x = "Zipcode", y = "Profitability of Properties")+
+  theme_bw() + 
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),panel.border = element_blank(),
+        axis.text.x = element_text(hjust = 1))+
+  guides(fill = guide_legend(title = "Neighbourhood"))
+
+ggplotly(profit_plot)
+
+```
+
+<br/>
+
+
+## Price Trend    
+
+When making investment decisions, companies should not only consider the current market situation, but should also have a developing vision. Price trend in the real estate industry is also important factors to consider.       
+From the time series plot, we can see that after 2010, prices in four neighborhoods are all increasing. Staten Island and Queens have a slightly higher increasing rate.   
+
+
+```{r trend, warning=FALSE}
+#growth rate
+#summarize by neighborhood
+    neighbor_summary <- dt_full %>%
+      group_by(neighbourhood_group_cleansed) %>%
+      summarize_each(funs(mean)) %>%
+      select(neighbourhood_group_cleansed, contains("-"))
+    
+    
+    t_neighbor_summary <- data.frame(t(neighbor_summary))
+    t_neighbor_summary <-t_neighbor_summary[-1,] 
+    names(t_neighbor_summary)[1:4]=c("Brooklyn", "Manhattan", "Queens", "Staten Island")
+    t_neighbor_summary$date_ts <- seq(as.Date("1996-04-01"), as.Date("2017-06-01"),by = "month")
+    t_neighbor_summary$Brooklyn <- as.numeric(paste(t_neighbor_summary$Brooklyn))
+    t_neighbor_summary$Manhattan <- as.numeric(paste(t_neighbor_summary$Manhattan))
+    t_neighbor_summary$Queens <- as.numeric(paste(t_neighbor_summary$Queens))
+    t_neighbor_summary$`Staten Island` <- as.numeric(paste(t_neighbor_summary$`Staten Island`))
+    
+    
+    trend_plot <- plot_ly(x = t_neighbor_summary$date_ts, y = t_neighbor_summary$Brooklyn, 
+                          type="scatter", mode="lines", name = 'Brooklyn', fill = "Paired") %>%
+      add_trace(p, x = t_neighbor_summary$date_ts, y = t_neighbor_summary$Manhattan, 
+                type="scatter", mode="lines", name = 'Manhattan', fill = "Paired") %>%
+      add_trace(p, x = t_neighbor_summary$date_ts, y = t_neighbor_summary$Queens, 
+                type="scatter", mode="lines", name = 'Queens', fill = "Paired") %>%
+      add_trace(p, x = t_neighbor_summary$date_ts, y = t_neighbor_summary$`Staten Island`, 
+                type="scatter", mode="lines", name = 'Staten Island', fill = "Paired")
+    
+    
+    ggplotly(trend_plot)
+
+
+```
+
+<br/>
+
+***   
+
+# Scoring Metrics  
+
+Since there are multiple factors mentioned above influencing investment decisions, we can construct a scoring metrics to comprehensively evaluate these factors and score the different factors according to the set weights, and finally get a normalized score to select the best zipcodes.      
+When the weight of count, cost, revenue, profit, payback year and trend are initially set as 0.2, 0.2, 0.1, 0.3, 0.1, 0.1, the top 10 zipcodes with the highest score are: 11434, 10306, 11215, 10036, 10303, 10304, 10308, 10305, 10314, 11234. Six of them are located in Staten Island, two are in Brooklyn, one in Manhattan and one in Queens.     
+
+```{r metrics, warning=FALSE}
+#scoring matric
+weight_count <- 0.2
+weight_cost <- 0.2
+weight_rev <- 0.1
+weight_payback <- 0.1
+weight_profit <- 0.3
+weight_trend <- 1-weight_count-weight_cost-weight_rev-weight_payback-weight_profit
+
+zip_summary$score <- round(weight_count*(zip_summary$count/mean(zip_summary$count))+
+ weight_cost*(1/(zip_summary$avg_cost/mean(zip_summary$avg_cost)))+                       weight_rev*(zip_summary$avg_annual_rev/mean(zip_summary$avg_annual_rev))+
+ weight_payback*(1/(zip_summary$payback_year/mean(zip_summary$payback_year)))+            weight_profit*(zip_summary$rev_cost_ratio/mean(zip_summary$rev_cost_ratio))+
+ weight_trend*(zip_summary$trend/mean(zip_summary$trend)),2)
+
+
+score_plot <- 
+  zip_summary %>%
+  arrange(desc(score)) %>%
+  top_n(10, score) %>%
+  ggplot(aes(x = reorder(zipcode, score), y = score, fill = neighbourhood))+
+  geom_col()+
+  coord_flip()+
+  labs(x = "Zipcode", y = "Score of Properties")+
+  theme_bw() + 
+  theme(plot.background = element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),panel.border = element_blank(),
+        axis.text.x = element_text(hjust = 1))+
+  guides(fill = guide_legend(title = "Neighbourhood"))
+
+ggplotly(score_plot)
+
+```
+
+<br/>
+
+***   
+# Invest Map  
+
+
+From the invest map, we can intuitively see which zipcodes areas are most worthy of investment. Properties in different areas are shown in different colored dots. The size of the points represents the estimated annual revenue for the next year.     
+
+You can see that these zipcodes are scattered across four different areas of New York. Staten island has the most zipcodes, which are located on the east and west sides. The Carroll Gardens and Marine Park areas in Northwest Brooklyn as well as Jamaica area in Queens are also good choices, while In Manhattan, properties near the Times square in midtown are the best investments.     
+
+```{r map, warning=FALSE}
+weight_count <- 0.2
+weight_cost <- 0.2
+weight_rev <- 0.1
+weight_payback <- 0.1
+weight_profit <- 0.3
+weight_trend <- 1-weight_count-weight_cost-weight_rev-weight_payback-weight_profit
+zip_summary$score <- round(weight_count*(zip_summary$count/mean(zip_summary$count))+
+                             weight_cost*(1/(zip_summary$avg_cost/mean(zip_summary$avg_cost)))+
+                             weight_rev*(zip_summary$avg_annual_rev/mean(zip_summary$avg_annual_rev))+
+                             weight_payback*(1/(zip_summary$payback_year/mean(zip_summary$payback_year)))+ 
+                             weight_profit*(zip_summary$rev_cost_ratio/mean(zip_summary$rev_cost_ratio))+
+                             weight_trend*(zip_summary$trend/mean(zip_summary$trend)),2)
+   
+
+ top_score <- head(arrange(zip_summary,desc(score)),n=10)
+    top_score <- top_score$zipcode
+    dt_top <- dt %>% filter(zipcode %in% top_score)
+    
+    map_text <- paste("zipcode: ",dt_top$zipcode,"<br/>",
+                      "longitude: ",dt_top$longitude,"<br/>", 
+                      "latitude: ", dt_top$latitude,"<br/>", 
+                      "daily price: ",dt_top$avg_daily_price, sep="") %>%
+                lapply(htmltools::HTML)
+    
+    pal <- colorFactor(palette = "plasma", domain = dt$zipcode)
+    
+    leaflet(dt_top) %>% 
+      addTiles() %>% 
+      setView( lng = -73.97, lat = 40.7, zoom = 10 ) %>% 
+      addProviderTiles("OpenStreetMap.Mapnik") %>%
+      addCircleMarkers(~longitude, ~latitude, radius = 5,
+                       color = ~pal(zipcode),
+                       stroke = FALSE, fillOpacity = 0.6,
+                       label = map_text,
+                       labelOptions = 
+                         labelOptions(style = list("font-weight" = "normal", 
+                         padding = "3px 8px"), textsize = "13px", direction = "auto")
+      ) %>%
+      addLegend( pal= pal , values=~zipcode, opacity=0.9, title = "Zipcode", 
+                 position = "bottomright")
+    
+    
+
+
+```
+
+
+<br/>
+
+***   
+
+# Insights   
+
+### Comprehensive consideration:   
+
+* Based on the comprehensive scoring method, the top 10 zipcodes with the highest score are: 11434, 10306, 11215, 10036, 10303, 10304, 10308, 10305, 10314, 11234. Six of them are located in Staten Island, two are in Brooklyn, one in Manhattan and one in Queens.   
+
+<br/>
+
+### Different key factors consideration:    
+
+**Number of properties & Cost of properties**   
+
+* Zipcodes 11215, 10303, 11434, 10304 and 10306 have substantial number of properties at low cost, which are located in Brooklyn, Staten Island and Queens. So, if the company has budget constraints then they should invest in buying properties in these zipcodes.   
+
+  + *Weight of count = 0.5, weight of cost = 0.5*   
+
+<br/>
+
+**Annual revenue & Revenue cost ratio **  
+
+* If the company is willing to buy properties having high cost, then they should invest in Zipcodes 10038 in Staten Island, 11215 in Brooklyn, 10036, 10003 and 10025 in Manhattan because these zipcodes not only have high number of costly properties but also provide very high return as the revenue is high.   
+
+  + *Weight of count = 0.5, weight of revenue = 0.2, weight of profit = 0.5*   
+
+<br/>
+
+**Payback year**   
+
+* If the company is more focused on getting its money back quickly with a limited initial investment, zipcodes 10038, 10314, 11434, 10303 and 10306 fit the bill, which are all located in Staten Island and Queens.   
+
+  + *Weight of cost = 0.5, weight of payback year = 0.5*   
+
+<br/>
+
+**Price trend**   
+
+* If the company attaches importance on long-term growth and future earnings and wants to invest in properties where rents are rising faster, these are the zipcodes to go: 10013, 10014, 10011 in Manhattan, 10308 in Staten Island, and 11201 in Brooklyn.    
+
+  + *Weight of profit = 0.5, weight of trend = 0.5*   
+
+<br/>
+
+
+### Other thoughts:  
+
+* Our basic recommendation for the company is to diversify and buy properties in top performing zips of different neighborhoods with prime focus on Staten Island.  
+
+* Through our products, the company can adjust the weight of each factor according to its actual needs to obtain the most suitable investment portfolio plan for its own investment strategy.  
+
+* If the company is a risk taker, it can choose the property with high investment and high yield. If the company is risk averse, it can choose the property with low initial cost and fast return.   
+
+* Company should diversify its investment portfolios and locations to not only minimize investment risk, but also lay the foundation for future expansion in multiple markets.  
+
+<br/>
+
+***   
+
+# What’s Next
+
+
+* New York hosts 176 zipcodes, data can be further enriched to account for rest of the zipcodes. This would give the company more opportunities to diverse the investment portfolio.  
+
+* Future revenue prediction: In the present analysis, we used average daily price * 360 * occupancy rate to calculate the annual revenue. It is true based on the assumption that the rental revenue will not dramatically change within a year. However, since the house price is continuingly increasing monthly, the rental price may also increase by time. Future analysis can consider the price trend of rental price in order to calculate income more accurately and realistically.    
+
+* Occupancy rate: In the present analysis, we simply assume the occupancy rate is 0.75 for every property in every zipcode. However, in reality, there may be many factors which can impact occupancy rate, such as review score, location and room quality. In the future, we could customize occupancy rate of each property by building a regression model.     
+
+* Interest rate: In this case, we have taken 0% discount rate as our assumption, but this assumption is not realistic. Some reasonable percentage rate can be taken to calculate NPV value and make a more accurate prediction.   
+
+* Text analytics on ignored description columns from revenue data: This would open insights about other metrics that drive customer to book an AirBnb property for rental such as access to public transport, parking space, etc.     
+
+
+<br/>
+<br/>
+<br/>
